@@ -1,0 +1,33 @@
+name: GeekNews 데일리 뉴스레터
+
+on:
+  schedule:
+    # 매일 오전 9시 KST = UTC 00:00
+    - cron: '0 0 * * *'
+  # 수동 테스트 실행 버튼
+  workflow_dispatch:
+
+jobs:
+  send-newsletter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 의존성 설치
+        run: pip install google-genai requests beautifulsoup4
+
+      - name: 뉴스레터 생성 및 발송
+        env:
+          GEMINI_API_KEY:    ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_USER:        ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL:   ${{ secrets.RECIPIENT_EMAIL }}
+        run: python send_newsletter.py
