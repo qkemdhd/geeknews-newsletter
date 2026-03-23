@@ -35,104 +35,94 @@ def get_yesterday():
 
 
 # ───────────────────────────────────────────
-# 2. 상대 시간 → datetime 변환 (KST 기준)
-#    GeekNews 표기: "N분전" / "N시간전" / "N일전" / "어제"
-#    또는 title 속성에 "YYYY-MM-DD HH:MM:SS" 절대 시간
+# 2. div.topicinfo 텍스트에서 상대 시간 파싱
+#    예: "4 points by user 4시간전 | 댓글 2개"
 # ───────────────────────────────────────────
-def parse_time_tag(time_tag):
+def parse_posted_date(info_text):
     now = datetime.now(KST)
 
-    # title 속성에 절대 시간이 있으면 우선 사용
-    title_attr = time_tag.get("title", "").strip()
-    if re.match(r'\d{4}-\d{2}-\d{2}', title_attr):
-        try:
-            dt = datetime.strptime(title_attr[:19], "%Y-%m-%d %H:%M:%S")
-            return dt.replace(tzinfo=KST)
-        except ValueError:
-            pass
-
-    # 상대 시간 파싱
-    text = time_tag.get_text(strip=True)
-
-    m = re.search(r'(\d+)\s*분\s*전', text)
+    m = re.search(r'(\d+)\s*분\s*전', info_text)
     if m:
-        return now - timedelta(minutes=int(m.group(1)))
+        return (now - timedelta(minutes=int(m.group(1)))).strftime("%Y-%m-%d")
 
-    m = re.search(r'(\d+)\s*시간\s*전', text)
+    m = re.search(r'(\d+)\s*시간\s*전', info_text)
     if m:
-        return now - timedelta(hours=int(m.group(1)))
+        return (now - timedelta(hours=int(m.group(1)))).strftime("%Y-%m-%d")
 
-    m = re.search(r'(\d+)\s*일\s*전', text)
+    m = re.search(r'(\d+)\s*일\s*전', info_text)
     if m:
-        return now - timedelta(days=int(m.group(1)))
+        return (now - timedelta(days=int(m.group(1)))).strftime("%Y-%m-%d")
 
-    if '어제' in text:
-        return now - timedelta(days=1)
+    if '어제' in info_text:
+        return (now - timedelta(days=1)).strftime("%Y-%m-%d")
 
     return None
 
 
 # ───────────────────────────────────────────
-# 3. GeekNews /new 페이지 크롤링
-#    /new 는 최신순 정렬 → 오래된 글 나오면 바로 중단 가능
+# 3. GeekNews /new 크롤링
 # ───────────────────────────────────────────
 def fetch_yesterday_posts(date_str):
     headers = {"User-Agent": "Mozilla/5.0 (compatible; NewsletterBot/1.0)"}
     posts   = []
 
-    for page in range(1, 10):  # 최대 10페이지 (보통 2~3페이지면 충분)
+    for page in range(1, 10):
         url  = f"{BASE_URL}/new?page={page}"
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
         soup  = BeautifulSoup(resp.text, "html.parser")
-        items = soup.select("li.topic_row, div.topic_row")
+        items = soup.select("div.topic_row")
 
         if not items:
-            print(f"   ⚠️  페이지 {page}: 게시물 없음 (셀렉터 불일치 가능)")
-            # 디버깅용: 실제 HTML 일부 출력
-            print(soup.prettify()[:500])
+            print(f"   → 페이지 {page}: 게시물 없음, 중단")
             break
 
         stop = False
         for item in items:
-            time_tag = item.select_one("span.time")
-            if not time_tag:
-                continue
+            # topicinfo 텍스트에서 시간 추출
+            info_div  = item.select_one("div.topicinfo")
+            info_text = info_div.get_text(" ", strip=True) if info_div else ""
+            item_date = parse_posted_date(info_text)
 
-            posted_dt = parse_time_tag(time_tag)
-            if posted_dt is None:
+            if item_date is None:
                 continue
-
-            item_date = posted_dt.strftime("%Y-%m-%d")
 
             if item_date == date_str:
-                # 어제 게시물 → 수집
-                title_tag  = item.select_one("a.topictitle")
-                if not title_tag:
+                # 제목 & 원문 URL
+                title_a  = item.select_one("div.topictitle > a")
+                if not title_a:
                     continue
+                h1_tag   = title_a.find("h1")
+                title    = h1_tag.get_text(strip=True) if h1_tag else title_a.get_text(strip=True)
+                orig_url = title_a.get("href", "")
 
-                title      = title_tag.get_text(strip=True)
-                href       = title_tag.get("href", "")
-                link       = href if href.startswith("http") else BASE_URL + href
-                point_tag  = item.select_one("span.point")
-                cmt_tag    = item.select_one("a.comments_count")
-                origin_tag = item.select_one("a.domain")
+                # GeekNews 토픽 페이지 링크
+                gn_a   = item.select_one("div.topicdesc > a")
+                gn_link = (BASE_URL + "/" + gn_a["href"].lstrip("/")
+                           if gn_a else BASE_URL)
+
+                # 포인트
+                pt_span = item.select_one("span[id^='tp']")
+                points  = pt_span.get_text(strip=True) if pt_span else "0"
+
+                # 댓글
+                cmt_a    = item.select_one("a.u")
+                comments = cmt_a.get_text(strip=True) if cmt_a else "댓글 없음"
 
                 posts.append({
                     "title":      title,
-                    "link":       link,
-                    "origin_url": origin_tag["href"] if origin_tag else link,
-                    "points":     point_tag.get_text(strip=True) if point_tag else "0",
-                    "comments":   cmt_tag.get_text(strip=True)   if cmt_tag   else "0",
+                    "link":       gn_link,   # GeekNews 토픽 페이지 (클릭 시 이동)
+                    "origin_url": orig_url,  # 원문 URL
+                    "points":     points,
+                    "comments":   comments,
                 })
 
             elif item_date < date_str:
-                # 이틀 이상 지난 글 → 이후 게시물은 더 오래됐으므로 중단
-                print(f"   → {item_date} 게시물 발견, 수집 완료 (총 {len(posts)}개)")
+                # 이틀 이상 된 글 → 이후는 더 오래됐으므로 중단
+                print(f"   → {item_date} 게시물 발견, 수집 종료 (총 {len(posts)}개)")
                 stop = True
                 break
-
-            # item_date > date_str 이면 오늘 게시물 → 건너뜀
+            # item_date > date_str → 오늘 글, 건너뜀
 
         if stop:
             break
@@ -143,10 +133,10 @@ def fetch_yesterday_posts(date_str):
 # ───────────────────────────────────────────
 # 4. 게시물 본문 가져오기
 # ───────────────────────────────────────────
-def fetch_post_content(link):
+def fetch_post_content(gn_link):
     try:
         headers = {"User-Agent": "Mozilla/5.0 (compatible; NewsletterBot/1.0)"}
-        resp = requests.get(link, headers=headers, timeout=15)
+        resp = requests.get(gn_link, headers=headers, timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -211,7 +201,7 @@ def build_html(date_kor, posts):
     for i, item in enumerate(posts, 1):
         summary_html = md_to_html(item["summary"])
         origin_link  = (f'&nbsp;|&nbsp; <a href="{item["origin_url"]}" target="_blank">원문 보기 →</a>'
-                        if item["origin_url"] != item["link"] else "")
+                        if item["origin_url"] and item["origin_url"] != item["link"] else "")
         articles_html += f"""
         <div class="article">
           <div class="article-num">{i}</div>
@@ -219,7 +209,7 @@ def build_html(date_kor, posts):
             <a href="{item['link']}" target="_blank">{item['title']}</a>
           </h2>
           <div class="article-meta">
-            👍 {item['points']}점 &nbsp;|&nbsp; 💬 {item['comments']}개 댓글{origin_link}
+            👍 {item['points']}점 &nbsp;|&nbsp; 💬 {item['comments']}{origin_link}
           </div>
           <div class="summary">{summary_html}</div>
         </div>"""
@@ -292,7 +282,7 @@ def build_html(date_kor, posts):
     <div class="intro">
       어제 <strong>GeekNews</strong>에 올라온 주요 게시물
       <strong>{len(posts)}개</strong>를 쉽게 정리했습니다.
-      제목을 클릭하면 원문 게시물로 이동합니다. ☕
+      제목을 클릭하면 GeekNews 게시물로 이동합니다. ☕
     </div>
     {articles_html}
   </div>
