@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-GeekNews (news.hada.io) 어제자 게시물을 수집하여
+GeekNews (news.hada.io/new) 어제자 게시물을 수집하여
 Google Gemini AI로 요약 후 Gmail로 발송하는 스크립트
 """
 
 import os
+import re
 import smtplib
 import requests
 from bs4 import BeautifulSoup
@@ -34,32 +35,85 @@ def get_yesterday():
 
 
 # ───────────────────────────────────────────
-# 2. GeekNews 게시물 크롤링
+# 2. 상대 시간 → datetime 변환 (KST 기준)
+#    GeekNews 표기: "N분전" / "N시간전" / "N일전" / "어제"
+#    또는 title 속성에 "YYYY-MM-DD HH:MM:SS" 절대 시간
+# ───────────────────────────────────────────
+def parse_time_tag(time_tag):
+    now = datetime.now(KST)
+
+    # title 속성에 절대 시간이 있으면 우선 사용
+    title_attr = time_tag.get("title", "").strip()
+    if re.match(r'\d{4}-\d{2}-\d{2}', title_attr):
+        try:
+            dt = datetime.strptime(title_attr[:19], "%Y-%m-%d %H:%M:%S")
+            return dt.replace(tzinfo=KST)
+        except ValueError:
+            pass
+
+    # 상대 시간 파싱
+    text = time_tag.get_text(strip=True)
+
+    m = re.search(r'(\d+)\s*분\s*전', text)
+    if m:
+        return now - timedelta(minutes=int(m.group(1)))
+
+    m = re.search(r'(\d+)\s*시간\s*전', text)
+    if m:
+        return now - timedelta(hours=int(m.group(1)))
+
+    m = re.search(r'(\d+)\s*일\s*전', text)
+    if m:
+        return now - timedelta(days=int(m.group(1)))
+
+    if '어제' in text:
+        return now - timedelta(days=1)
+
+    return None
+
+
+# ───────────────────────────────────────────
+# 3. GeekNews /new 페이지 크롤링
+#    /new 는 최신순 정렬 → 오래된 글 나오면 바로 중단 가능
 # ───────────────────────────────────────────
 def fetch_yesterday_posts(date_str):
     headers = {"User-Agent": "Mozilla/5.0 (compatible; NewsletterBot/1.0)"}
-    posts = []
+    posts   = []
 
-    for page in range(1, 6):
-        url = f"{BASE_URL}/?page={page}"
+    for page in range(1, 10):  # 최대 10페이지 (보통 2~3페이지면 충분)
+        url  = f"{BASE_URL}/new?page={page}"
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        items = soup.select("div.topic_row")
+        soup  = BeautifulSoup(resp.text, "html.parser")
+        items = soup.select("li.topic_row, div.topic_row")
 
+        if not items:
+            print(f"   ⚠️  페이지 {page}: 게시물 없음 (셀렉터 불일치 가능)")
+            # 디버깅용: 실제 HTML 일부 출력
+            print(soup.prettify()[:500])
+            break
+
+        stop = False
         for item in items:
             time_tag = item.select_one("span.time")
             if not time_tag:
                 continue
-            item_date = time_tag.get("title", "")[:10]
+
+            posted_dt = parse_time_tag(time_tag)
+            if posted_dt is None:
+                continue
+
+            item_date = posted_dt.strftime("%Y-%m-%d")
 
             if item_date == date_str:
-                title_tag = item.select_one("a.topictitle")
+                # 어제 게시물 → 수집
+                title_tag  = item.select_one("a.topictitle")
                 if not title_tag:
                     continue
 
                 title      = title_tag.get_text(strip=True)
-                link       = BASE_URL + title_tag["href"]
+                href       = title_tag.get("href", "")
+                link       = href if href.startswith("http") else BASE_URL + href
                 point_tag  = item.select_one("span.point")
                 cmt_tag    = item.select_one("a.comments_count")
                 origin_tag = item.select_one("a.domain")
@@ -68,18 +122,26 @@ def fetch_yesterday_posts(date_str):
                     "title":      title,
                     "link":       link,
                     "origin_url": origin_tag["href"] if origin_tag else link,
-                    "points":     point_tag.get_text(strip=True)  if point_tag else "0",
-                    "comments":   cmt_tag.get_text(strip=True)    if cmt_tag   else "0",
+                    "points":     point_tag.get_text(strip=True) if point_tag else "0",
+                    "comments":   cmt_tag.get_text(strip=True)   if cmt_tag   else "0",
                 })
 
             elif item_date < date_str:
-                return posts
+                # 이틀 이상 지난 글 → 이후 게시물은 더 오래됐으므로 중단
+                print(f"   → {item_date} 게시물 발견, 수집 완료 (총 {len(posts)}개)")
+                stop = True
+                break
+
+            # item_date > date_str 이면 오늘 게시물 → 건너뜀
+
+        if stop:
+            break
 
     return posts
 
 
 # ───────────────────────────────────────────
-# 3. 게시물 본문 가져오기
+# 4. 게시물 본문 가져오기
 # ───────────────────────────────────────────
 def fetch_post_content(link):
     try:
@@ -88,7 +150,7 @@ def fetch_post_content(link):
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        content_div = soup.select_one("div.content") or soup.select_one("div.topic_content")
+        content_div = soup.select_one("div.content, div.topic_content")
         if content_div:
             return content_div.get_text(separator="\n", strip=True)[:3000]
 
@@ -99,7 +161,7 @@ def fetch_post_content(link):
 
 
 # ───────────────────────────────────────────
-# 4. Gemini AI 요약
+# 5. Gemini AI 요약
 # ───────────────────────────────────────────
 def summarize_post(client, post):
     content = fetch_post_content(post["link"])
@@ -125,10 +187,9 @@ def summarize_post(client, post):
 
 
 # ───────────────────────────────────────────
-# 5. HTML 뉴스레터 생성
+# 6. HTML 뉴스레터 생성
 # ───────────────────────────────────────────
 def md_to_html(text):
-    import re
     text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
     lines = text.split("\n")
     html_lines = []
@@ -238,7 +299,7 @@ def build_html(date_kor, posts):
   <div class="footer">
     <p>이 뉴스레터는 <a href="{BASE_URL}">GeekNews</a>의 게시물을
        Google Gemini AI가 요약한 것입니다.</p>
-    <p>원문 출처: <a href="{BASE_URL}">{BASE_URL}</a></p>
+    <p>원문 출처: <a href="{BASE_URL}/new">{BASE_URL}/new</a></p>
   </div>
 </div>
 </body>
@@ -246,18 +307,17 @@ def build_html(date_kor, posts):
 
 
 # ───────────────────────────────────────────
-# 6. Gmail 발송 (다중 수신자 지원)
+# 7. Gmail 발송 (다중 수신자 BCC)
 # ───────────────────────────────────────────
 def send_email(subject, html_body, recipients):
-    # 쉼표로 구분된 문자열 → 리스트 변환
     if isinstance(recipients, str):
         recipients = [r.strip() for r in recipients.split(",") if r.strip()]
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = GMAIL_USER
-    msg["To"]      = GMAIL_USER              # 받는사람: 발신자 본인
-    msg["Bcc"]     = ", ".join(recipients)   # 숨은참조: 실제 수신자들 (서로 안 보임)
+    msg["To"]      = GMAIL_USER
+    msg["Bcc"]     = ", ".join(recipients)
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
@@ -273,16 +333,17 @@ def main():
     date_str, date_kor = get_yesterday()
     print(f"📅 수집 날짜: {date_kor} ({date_str})")
 
-    print("🔍 GeekNews 크롤링 중...")
+    print("🔍 GeekNews /new 크롤링 중...")
     posts = fetch_yesterday_posts(date_str)
+
     if not posts:
         print("⚠️  어제자 게시물이 없습니다. 종료합니다.")
         return
-    print(f"   → {len(posts)}개 게시물 발견")
+    print(f"   → 총 {len(posts)}개 게시물 수집 완료")
 
     client = genai.Client(api_key=GEMINI_API_KEY)
     for i, post in enumerate(posts, 1):
-        print(f"🤖 요약 중 ({i}/{len(posts)}): {post['title'][:40]}...")
+        print(f"🤖 요약 중 ({i}/{len(posts)}): {post['title'][:45]}...")
         post["summary"] = summarize_post(client, post)
 
     html    = build_html(date_kor, posts)
