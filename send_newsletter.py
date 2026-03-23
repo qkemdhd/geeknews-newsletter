@@ -246,19 +246,24 @@ def build_html(date_kor, posts):
 
 
 # ───────────────────────────────────────────
-# 6. Gmail 발송
+# 6. Gmail 발송 (다중 수신자 지원)
 # ───────────────────────────────────────────
-def send_email(subject, html_body, recipient):
+def send_email(subject, html_body, recipients):
+    # 쉼표로 구분된 문자열 → 리스트 변환
+    if isinstance(recipients, str):
+        recipients = [r.strip() for r in recipients.split(",") if r.strip()]
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = GMAIL_USER
-    msg["To"]      = recipient
+    msg["To"]      = GMAIL_USER              # 받는사람: 발신자 본인
+    msg["Bcc"]     = ", ".join(recipients)   # 숨은참조: 실제 수신자들 (서로 안 보임)
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(GMAIL_USER, GMAIL_APP_PW)
-        server.sendmail(GMAIL_USER, recipient, msg.as_string())
-    print(f"✅ 이메일 발송 완료 → {recipient}")
+        server.sendmail(GMAIL_USER, recipients, msg.as_string())
+    print(f"✅ 이메일 발송 완료 (숨은참조) → {', '.join(recipients)}")
 
 
 # ───────────────────────────────────────────
