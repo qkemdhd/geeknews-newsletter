@@ -151,7 +151,7 @@ def summarize_post(client, post):
 - (기억할 만한 사실 3)
 
 전문 용어는 쉬운 말로 풀어쓰고, 친근한 톤으로 작성하세요."""
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+    response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
     text = response.text
 
     # 카테고리 추출
